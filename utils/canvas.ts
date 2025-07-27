@@ -1,4 +1,5 @@
 
+
 import { Canvas, loadImage as skiaLoadImage, Image, Context2d } from 'skia-canvas';
 
 /**
@@ -178,16 +179,13 @@ export const composeImage = async (
   let lineHeight: number;
   let lines: string[];
 
-  // This needs pre-loading of fonts on server
-  ctx.font = `bold 72px 'Poppins', 'sans-serif'`;
-  await canvas.loadFont('https://fonts.gstatic.com/s/poppins/v20/pxiByp8kv8JHgFVrLCz7Z1xlFQ.woff2', { family: 'Poppins', weight: '700' });
-  await canvas.loadFont('https://fonts.gstatic.com/s/inter/v12/UcC73FwrK3iLTeHuS_fvQtMwCp50KnMa1ZL7.woff2', { family: 'Inter', weight: '400' });
-  await canvas.loadFont('https://fonts.gstatic.com/s/inter/v12/UcC73FwrK3iLTeHuS_fvQtMwCp50KnMa1ZL7.woff2', { family: 'Inter', weight: '600' });
-
+  // CRITICAL FIX: Removed all canvas.loadFont() calls.
+  // Using generic font families like 'sans-serif' avoids font file loading
+  // issues in serverless environments, which was the likely cause of the "File not found" error.
 
   while (fontSize > 20) {
     lineHeight = fontSize * 1.2;
-    ctx.font = `bold ${fontSize}px Poppins`;
+    ctx.font = `bold ${fontSize}px sans-serif`;
     lines = calculateLines(ctx, headline, maxWidth);
     const currentHeight = lines.length * lineHeight;
     if (currentHeight <= maxTextHeight) break;
@@ -208,7 +206,7 @@ export const composeImage = async (
 
   // --- Drawing Step 7: Draw the Brand Text ---
   ctx.fillStyle = 'white';
-  ctx.font = "600 24px Inter";
+  ctx.font = "600 24px sans-serif";
   ctx.textAlign = 'right';
   ctx.textBaseline = 'bottom';
   

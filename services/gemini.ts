@@ -2,12 +2,10 @@
 
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import type { NewsAnalysis, NewsDataArticle } from '../types';
+import { GEMINI_API_KEY } from '../constants';
 
-// Ensure the API key is available
-if (!process.env.API_KEY) {
-    throw new Error("API_KEY environment variable not set.");
-}
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+// Initialize the AI client with the hardcoded API key from constants
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 /**
  * Parses the raw text response from the Gemini API into a structured NewsAnalysis object.

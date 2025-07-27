@@ -1,4 +1,5 @@
 {
-  "name": "Empty",
-  "description": "An empty app"
+  "name": "Bangla News Content Automator",
+  "description": "An AI-powered tool to automatically generate engaging social media content from the latest news in Bangladesh. It finds trending news, creates a headline, generates a relevant image, and combines them into a shareable post with a caption.",
+  "requestFramePermissions": []
 }
