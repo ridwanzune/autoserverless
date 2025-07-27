@@ -1,10 +1,6 @@
 
 export const NEWSDATA_API_KEY = 'pub_1058e1309a4d4112a59c6f7847c1a98a';
 
-// --- NEW: GEMINI API KEY ---
-// This key is hardcoded as per user request for deployment simplicity.
-export const GEMINI_API_KEY = 'AIzaSyAp0A5k9v_03To0RNieHAhAPGEc_1gEuz4';
-
 // --- NEW: CLOUDINARY & WEBHOOK CONSTANTS ---
 export const CLOUDINARY_CLOUD_NAME = 'dukaroz3u';
 export const CLOUDINARY_API_KEY = '151158368369834';

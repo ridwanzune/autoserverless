@@ -1,10 +1,8 @@
-
-
 import { GoogleGenAI, GenerateContentResponse } from "@google/genai";
 import type { NewsAnalysis, NewsDataArticle } from '../types';
-import { GEMINI_API_KEY } from '../constants';
+import { GEMINI_API_KEY } from '../apiKey';
 
-// Initialize the AI client with the hardcoded API key from constants
+// Initialize the AI client with the hardcoded key
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 /**
@@ -15,63 +13,69 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
  * @throws An error if the response text cannot be parsed into the required format.
  */
 const parseAnalysisResponse = (text: string): NewsAnalysis => {
-    const lines = text.split('\n');
-    const analysis: Partial<Omit<NewsAnalysis, 'highlightPhrases'> & { highlightPhrases: string[] }> = {
+    const analysis: Partial<NewsAnalysis> = {
       highlightPhrases: []
     };
-    let isParsingCaption = false;
+    const lines = text.split('\n');
+    let currentField: keyof NewsAnalysis | null = null;
     const captionLines: string[] = [];
-    let isParsingImagePrompt = false;
     const imagePromptLines: string[] = [];
 
-
-    // Iterate over each line to find and extract the required fields.
     lines.forEach(line => {
-        // Reset flags when a new field is encountered
-        if (line.startsWith('HEADLINE:') || line.startsWith('HIGHLIGHT_WORDS:') || line.startsWith('SOURCE_NAME:') || line.startsWith('CAPTION:') || line.startsWith('IMAGE_PROMPT:')) {
-            isParsingCaption = false;
-            isParsingImagePrompt = false;
-        }
-
         if (line.startsWith('HEADLINE:')) {
+            currentField = 'headline';
             analysis.headline = line.substring('HEADLINE:'.length).trim();
         } else if (line.startsWith('HIGHLIGHT_WORDS:')) {
+            currentField = 'highlightPhrases';
             analysis.highlightPhrases = line.substring('HIGHLIGHT_WORDS:'.length).trim().split(',').map(w => w.trim()).filter(Boolean);
         } else if (line.startsWith('SOURCE_NAME:')) {
+            currentField = 'sourceName';
             analysis.sourceName = line.substring('SOURCE_NAME:'.length).trim();
         } else if (line.startsWith('CAPTION:')) {
-            isParsingCaption = true;
-            const captionPart = line.substring('CAPTION:'.length).trim();
-            if (captionPart) captionLines.push(captionPart);
+            currentField = 'caption';
+            const content = line.substring('CAPTION:'.length).trim();
+            if (content) captionLines.push(content);
         } else if (line.startsWith('IMAGE_PROMPT:')) {
-            isParsingImagePrompt = true;
-            const promptPart = line.substring('IMAGE_PROMPT:'.length).trim();
-            if (promptPart) imagePromptLines.push(promptPart);
-        } else if (isParsingCaption) {
+            currentField = 'imagePrompt';
+            const content = line.substring('IMAGE_PROMPT:'.length).trim();
+            if (content) imagePromptLines.push(content);
+        } else if (currentField === 'caption') {
             captionLines.push(line.trim());
-        } else if (isParsingImagePrompt) {
+        } else if (currentField === 'imagePrompt') {
             imagePromptLines.push(line.trim());
         }
+        // Other lines (like CHOSEN_ID) are ignored.
     });
 
-    // Join the captured lines back together with newlines.
     if (captionLines.length > 0) {
-        analysis.caption = captionLines.filter(Boolean).join('\n');
+        analysis.caption = captionLines.join('\n').trim();
     }
     if (imagePromptLines.length > 0) {
-        analysis.imagePrompt = imagePromptLines.filter(Boolean).join(' ');
+        analysis.imagePrompt = imagePromptLines.join(' ').trim();
     }
 
+    // --- Robustness check for SOURCE_NAME ---
+    // If SOURCE_NAME field was missing, try to extract it from the caption.
+    if (!analysis.sourceName && analysis.caption) {
+        const sourceRegex = /\s*Source:\s*(.*)$/i;
+        const match = analysis.caption.match(sourceRegex);
+        if (match && match[1]) {
+            analysis.sourceName = match[1].trim();
+            // Also, remove the "Source: ..." part from the caption itself.
+            analysis.caption = analysis.caption.replace(sourceRegex, '').trim();
+        }
+    }
 
     // Final validation to ensure all parts were successfully parsed.
     if (!analysis.headline || !analysis.caption || !analysis.sourceName || !analysis.highlightPhrases || analysis.highlightPhrases.length === 0 || !analysis.imagePrompt) {
         console.error("Failed to parse response text:", text);
-        console.error("Parsed analysis object:", analysis);
+        console.error("Parsed analysis object:", JSON.stringify(analysis, null, 2));
         throw new Error("Could not parse all required fields from the AI response. The format might be incorrect.");
     }
 
     return analysis as NewsAnalysis;
 }
+
 
 /**
  * Reviews a list of news articles, asks the AI to select the single best one,
@@ -99,8 +103,9 @@ Source: ${article.source_id}
 You are an expert news editor for a Bangladeshi social media channel. Your goal is to find the single most important, impactful, and relevant story for your audience from a list of recent articles.
 
 **Your First Task: Select the Best Article**
-- Review all articles and select the ONE that is most newsworthy and DIRECTLY relevant to Bangladesh. This means the story's main subject is an event, person, or entity within Bangladesh, or has a significant, direct impact on Bangladesh or its citizens.
-- **Crucial Rule:** AVOID articles that are primarily about neighboring countries (e.g., India, Pakistan) unless Bangladesh is a central part of the story (e.g., a bilateral agreement, a joint-venture, etc.). An article just mentioning Bangladesh in passing is not sufficient.
+- You will be given a list of news articles.
+- Review all articles and select the ONE that is most newsworthy and DIRECTLY about Bangladesh.
+- **CRITICAL RULE:** The article's main subject MUST be Bangladesh. News about other countries (e.g., India) is NOT relevant unless Bangladesh or a Bangladeshi entity is a primary subject of the article (e.g., a bilateral agreement). An article about Indian politics is irrelevant. Be extremely strict.
 - If NONE of the articles meet this strict criteria, you MUST respond with ONLY the single word: IRRELEVANT.
 
 **If you find a suitable article, proceed to Your Second Task:**
@@ -109,23 +114,23 @@ You are an expert news editor for a Bangladeshi social media channel. Your goal 
 
 **Analysis Steps:**
 **1. Headline Generation (IMPACT Principle):** Informative, Main Point, Prompting Curiosity, Active Voice, Concise, Targeted.
-**2. Highlight Phrase Identification:** Identify 2-3 key phrases from your new headline that capture critical information (entities, key terms, numbers). List these exact phrases, separated by commas.
+**2. Highlight Phrase Identification:** Identify key phrases from your new headline that capture critical information (entities, key terms, numbers). List these exact phrases, separated by commas.
 **3. Image Prompt Generation (SCAT Principle & Safety):** Generate a concise, descriptive prompt for an AI image generator. The prompt MUST be safe for work and MUST NOT contain depictions of specific people (especially political figures), violence, conflict, or other sensitive topics. Instead, focus on symbolic, abstract, or neutral representations of the news. For example, for a political story, prompt "Gavel on a table with a Bangladeshi flag in the background" instead of showing politicians. The prompt should follow the SCAT principle (Subject, Context, Atmosphere, Type).
-**4. Caption & Source:** Create a social media caption (~50 words) with 3-5 relevant hashtags. The caption must end with 'Source: [Source Name]'.
+**4. Caption & Source:** Create a social media caption (~50 words) with 3-5 relevant hashtags.
 
 **List of Articles to Analyze:**
 ${articleListForPrompt}
 
 **Output Format (Strict):**
 - If no article is relevant, respond ONLY with: IRRELEVANT
-- If you find a relevant article, respond ONLY with the following format. Do not add any other text.
+- If you find a relevant article, respond ONLY with the following format. Do not add any other text or formatting. Each field must be on a new line.
 
 CHOSEN_ID: [The ID number of the article you selected]
 HEADLINE: [Your generated headline for the chosen article]
 HIGHLIGHT_WORDS: [phrase 1, phrase 2]
 IMAGE_PROMPT: [Your generated image prompt]
-CAPTION: [Your generated caption ending with Source: Source Name]
-SOURCE_NAME: [The source name from the chosen article]
+CAPTION: [Your generated caption. Crucially, DO NOT include the source name in the caption.]
+SOURCE_NAME: [The source name (e.g., 'thedailystar') from the chosen article. This is a mandatory and separate field.]
 `;
 
     try {

@@ -1,8 +1,7 @@
-
 import { GoogleGenAI } from "@google/genai";
-import { GEMINI_API_KEY } from '../constants';
+import { GEMINI_API_KEY } from '../apiKey';
 
-// Initialize the AI client with the hardcoded API key from constants
+// Initialize the AI client with the hardcoded key
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 

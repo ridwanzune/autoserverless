@@ -1,32 +1,37 @@
 
-
-import { Canvas, loadImage as skiaLoadImage, Image, Context2d } from 'skia-canvas';
-
 /**
- * Asynchronously loads an image from a given URL (which can be a web URL or a base64 data URL)
- * for use in a Node.js environment with skia-canvas.
+ * Asynchronously loads an image from a given URL (which can be a web URL or a base64 data URL).
+ * It conditionally sets `crossOrigin` to 'anonymous' to handle images from different domains,
+ * which is necessary for drawing them onto a canvas without tainting it.
  * @param src The URL of the image to load.
- * @returns A Promise that resolves with the loaded skia-canvas Image object or rejects on error.
+ * @returns A Promise that resolves with the loaded HTMLImageElement or rejects on error.
  */
-const loadImage = (src: string): Promise<Image> => {
-    try {
-        if (src.startsWith('data:')) {
-            // skia-canvas loadImage can't handle data urls directly, must use a Buffer
-            const base64Data = src.split(',')[1];
-            if (!base64Data) {
-                return Promise.reject(new Error("Invalid data URL: missing base64 content."));
-            }
-            const buffer = Buffer.from(base64Data, 'base64');
-            return skiaLoadImage(buffer);
-        }
-        // For http/https URLs, skia-canvas handles it directly.
-        return skiaLoadImage(src);
-    } catch (error) {
-        console.error(`Failed to initiate image loading for src: ${src.substring(0, 100)}...`, error);
-        return Promise.reject(error);
+const loadImage = (src: string): Promise<HTMLImageElement> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    
+    // Data URLs don't need CORS and can cause errors with it.
+    // Only apply for remote http/https images.
+    if (src.startsWith('http')) {
+      img.crossOrigin = 'anonymous';
     }
-};
 
+    img.onload = () => resolve(img);
+    
+    img.onerror = (err) => {
+      // Check if this was a fallback image to provide a more specific error.
+      if (!src.startsWith('http')) {
+        // This error is critical because it means the AI-generated fallback image failed to load.
+        reject(new Error('CRITICAL: The fallback image itself could not be loaded.'));
+      } else {
+        // This error indicates the original article image failed, and a fallback will be attempted.
+        reject(new Error(`Failed to load image from ${src.substring(0, 100)}...`));
+      }
+    };
+
+    img.src = src;
+  });
+};
 
 /**
  * Calculates how to break a single string of text into multiple lines
@@ -37,7 +42,7 @@ const loadImage = (src: string): Promise<Image> => {
  * @returns An array of strings, where each string is a single line of wrapped text.
  */
 const calculateLines = (
-  context: Context2d,
+  context: CanvasRenderingContext2D,
   text: string,
   maxWidth: number
 ): string[] => {
@@ -62,6 +67,10 @@ const calculateLines = (
 
 /**
  * Draws a pre-calculated set of text lines onto the canvas, applying highlights to specified phrases.
+ * This is a complex function that works in two passes for each line:
+ * 1.  It first draws the red highlight rectangles behind the text.
+ * 2.  It then draws the actual text on top of the highlights.
+ * This ensures the text is always crisp and readable.
  * @param context The 2D rendering context of the canvas.
  * @param lines An array of strings, where each entry is a line of text to be drawn.
  * @param highlightPhrases An array of phrases within the headline to highlight.
@@ -70,7 +79,7 @@ const calculateLines = (
  * @param lineHeight The height of each line of text.
  */
 const drawHeadlineWithHighlights = (
-  context: Context2d,
+  context: CanvasRenderingContext2D,
   lines: string[],
   highlightPhrases: string[],
   x: number, // center X
@@ -94,6 +103,7 @@ const drawHeadlineWithHighlights = (
         const beforeText = lineText.substring(0, startIndex);
         const highlightText = lineText.substring(startIndex, startIndex + phrase.length);
         
+        // Calculate the position and width of the highlight rectangle.
         const offsetX = context.measureText(beforeText).width;
         const phraseWidth = context.measureText(highlightText).width;
         
@@ -120,35 +130,35 @@ const drawHeadlineWithHighlights = (
  * @returns A Promise that resolves to a base64-encoded data URL of the final image.
  */
 export const composeImage = async (
-  mainImageSrc: string, // Changed to src string to work on server
+  mainImage: HTMLImageElement,
   headline: string,
   highlightPhrases: string[],
   logoUrl: string,
   brandText: string,
   overlayUrl: string
 ): Promise<string> => {
+  const canvas = document.createElement('canvas');
   const size = 1080; // Standard square post size.
-  const canvas = new Canvas(size, size);
+  canvas.width = size;
+  canvas.height = size;
   const ctx = canvas.getContext('2d');
 
   if (!ctx) {
     throw new Error('Could not get canvas context');
   }
-  
-  const [mainImage, overlayImage, logoImage] = await Promise.all([
-      loadImage(mainImageSrc),
-      loadImage(overlayUrl),
-      loadImage(logoUrl)
-  ]);
-
 
   // --- Drawing Step 1: Fill Background ---
+  // The base layer is white, which will show through in the top 30% headline area.
   ctx.fillStyle = 'white';
   ctx.fillRect(0, 0, size, size);
 
   // --- Drawing Step 2: Draw the Main Article Image ---
+  // This image will occupy the bottom 70% of the canvas.
   const imageTop = size * 0.3;
   const imageHeight = size * 0.7;
+  
+  // The following logic calculates how to crop the source image to perfectly fit the
+  // destination area (cover mode), preserving aspect ratio without distortion.
   const imgAspectRatio = mainImage.width / mainImage.height;
   const canvasAspectRatio = size / imageHeight;
   let sx, sy, sWidth, sHeight;
@@ -156,60 +166,84 @@ export const composeImage = async (
   if (imgAspectRatio > canvasAspectRatio) { // Image is wider than the canvas area.
     sHeight = mainImage.height;
     sWidth = sHeight * canvasAspectRatio;
-    sx = (mainImage.width - sWidth) / 2;
+    sx = (mainImage.width - sWidth) / 2; // Crop from the horizontal center.
     sy = 0;
   } else { // Image is taller or same aspect ratio.
     sWidth = mainImage.width;
     sHeight = sWidth / canvasAspectRatio;
     sx = 0;
-    sy = (mainImage.height - sHeight) / 2;
+    sy = (mainImage.height - sHeight) / 2; // Crop from the vertical center.
   }
   ctx.drawImage(mainImage, sx, sy, sWidth, sHeight, 0, imageTop, size, imageHeight);
 
   // --- Drawing Step 3: Draw Separator Line ---
+  // A thick black line to cleanly separate the headline area from the image.
   ctx.fillStyle = '#000000';
-  ctx.fillRect(0, imageTop - 2, size, 5);
+  ctx.fillRect(0, imageTop - 2, size, 5); // Made thicker (5px height).
 
   // --- Drawing Step 4: Draw the Headline (with dynamic font sizing) ---
+  // This section is now enhanced to prevent text from overflowing the white space.
   const textTopMargin = 60;
   const textSideMargin = 60;
-  const maxTextHeight = imageTop - textTopMargin - 40;
+  // Define the maximum vertical space available for the headline block.
+  const maxTextHeight = imageTop - textTopMargin - 40; // Top margin - bottom margin
   const maxWidth = size - textSideMargin * 2;
-  let fontSize = 72;
+
+  let fontSize = 72; // Start with the largest possible font size
   let lineHeight: number;
   let lines: string[];
 
-  // CRITICAL FIX: Removed all canvas.loadFont() calls.
-  // Using generic font families like 'sans-serif' avoids font file loading
-  // issues in serverless environments, which was the likely cause of the "File not found" error.
+  // This loop is the core of the overflow prevention. It starts with a large font size
+  // and repeatedly reduces it until the entire headline block fits within the
+  // designated `maxTextHeight`.
+  while (fontSize > 20) { // We set a minimum font size to prevent text from becoming unreadable.
+    lineHeight = fontSize * 1.2; // Keep line height proportional to the font size for good spacing.
+    ctx.font = `bold ${fontSize}px 'Poppins', sans-serif`;
 
-  while (fontSize > 20) {
-    lineHeight = fontSize * 1.2;
-    ctx.font = `bold ${fontSize}px sans-serif`;
+    // Calculate how the text will wrap with the current font size.
     lines = calculateLines(ctx, headline, maxWidth);
     const currentHeight = lines.length * lineHeight;
-    if (currentHeight <= maxTextHeight) break;
-    fontSize -= 4;
+
+    // If the calculated height fits, we've found our ideal font size and can stop.
+    if (currentHeight <= maxTextHeight) {
+      break;
+    }
+
+    fontSize -= 4; // The text is too tall, so we reduce the font size and try again.
   }
 
-  ctx.textAlign = 'left';
-  drawHeadlineWithHighlights(ctx, lines!, highlightPhrases, size / 2, textTopMargin, lineHeight!);
+  // Now, draw the headline using the calculated font size, line height, and wrapped lines.
+  ctx.textAlign = 'left'; // The helper function will handle centering logic.
+  drawHeadlineWithHighlights(
+    ctx,
+    lines!, // We know `lines` is defined from the loop above.
+    highlightPhrases,
+    size / 2, // Center X
+    textTopMargin,
+    lineHeight! // We know `lineHeight` is defined from the loop above.
+  );
   
   // --- Drawing Step 5: Draw the Visual Overlay ---
+  // This adds a texture over the entire image.
+  const overlayImage = await loadImage(overlayUrl);
   ctx.drawImage(overlayImage, 0, 0, size, size);
 
   // --- Drawing Step 6: Draw the Logo ---
-  const logoHeight = 150;
+  // This is drawn on top of the overlay on the bottom-left.
+  const logoImage = await loadImage(logoUrl);
+  const logoHeight = 150; // Logo size increased.
   const logoWidth = (logoImage.width / logoImage.height) * logoHeight;
   const margin = 40;
   ctx.drawImage(logoImage, margin, size - logoHeight - margin, logoWidth, logoHeight);
 
   // --- Drawing Step 7: Draw the Brand Text ---
+  // This is drawn on top of the overlay on the bottom-right.
   ctx.fillStyle = 'white';
-  ctx.font = "600 24px sans-serif";
+  ctx.font = "600 24px 'Inter', sans-serif";
   ctx.textAlign = 'right';
   ctx.textBaseline = 'bottom';
   
+  // Add a dark shadow for better readability against any background.
   ctx.shadowColor = 'rgba(0, 0, 0, 0.7)';
   ctx.shadowBlur = 5;
   ctx.shadowOffsetX = 2;
@@ -217,13 +251,15 @@ export const composeImage = async (
   
   ctx.fillText(brandText, size - margin, size - margin);
 
+  // Reset shadow to prevent it from affecting subsequent drawings (good practice).
   ctx.shadowColor = 'transparent';
   ctx.shadowBlur = 0;
   ctx.shadowOffsetX = 0;
   ctx.shadowOffsetY = 0;
 
   // --- Final Step: Return the result ---
-  return await canvas.toDataURL('png');
+  // Convert the entire canvas to a PNG image represented as a base64 data URL.
+  return canvas.toDataURL('image/png');
 };
 
 export { loadImage };

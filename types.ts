@@ -10,6 +10,7 @@ export interface NewsAnalysis {
 export interface NewsDataArticle {
   title: string;
   link: string;
+  pubDate: string;
   source_id: string;
   image_url: string | null;
   description: string | null;

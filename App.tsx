@@ -1,128 +1,214 @@
 
 import React, { useState, useCallback, useEffect } from 'react';
 import { Header } from './components/Header';
+import { findAndAnalyzeBestArticleFromList } from './services/gemini';
+import { fetchLatestBangladeshiNews } from './services/news';
+import { composeImage, loadImage } from './utils/canvas';
 import { LOGO_URL, BRAND_TEXT, OVERLAY_IMAGE_URL, NEWS_CATEGORIES, API_FETCH_DELAY_MS } from './constants';
-import { BatchTask, TaskStatus } from './types';
+import { BatchTask, TaskStatus, WebhookPayload, NewsAnalysis, NewsDataArticle } from './types';
+import { uploadToCloudinary } from './services/cloudinary';
+import { sendToMakeWebhook } from './services/webhook';
 import { BatchStatusDisplay } from './components/BatchStatusDisplay';
+import { generateImageFromPrompt } from './services/imageGenerator';
+
+interface CollectedData {
+    taskId: string;
+    analysis: NewsAnalysis;
+    article: NewsDataArticle;
+}
 
 const App: React.FC = () => {
   const [tasks, setTasks] = useState<BatchTask[]>([]);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [completedCount, setCompletedCount] = useState(0);
-  const [automationTriggered, setAutomationTriggered] = useState(false);
-  const [warmupCopied, setWarmupCopied] = useState(false);
-  const [startCopied, setStartCopied] = useState(false);
-
-  // Initialize tasks state with all categories
-  const initializeTasks = () => {
-      const initialTasks: BatchTask[] = NEWS_CATEGORIES.map(cat => ({
-          id: cat.apiValue,
-          categoryName: cat.name,
-          status: TaskStatus.PENDING,
-      }));
-      setTasks(initialTasks);
-      setCompletedCount(0);
-  };
-  
-  // Set initial state on mount
-  useEffect(() => {
-      initializeTasks();
-  }, []);
-
-
-  const baseUrl = typeof window !== 'undefined' ? window.location.origin : '';
-  const warmupUrl = baseUrl;
-  // The start URL now points to our reliable serverless function
-  const startUrl = `${baseUrl}/api/automate`;
-
-  const handleCopy = (text: string, type: 'warmup' | 'start') => {
-    navigator.clipboard.writeText(text).then(() => {
-        if (type === 'warmup') {
-            setWarmupCopied(true);
-            setTimeout(() => setWarmupCopied(false), 2000);
-        } else {
-            setStartCopied(true);
-            setTimeout(() => setStartCopied(false), 2000);
-        }
-    });
-  };
+  const [baseUrl, setBaseUrl] = useState('');
+  const [hasTriggeredFromUrl, setHasTriggeredFromUrl] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState<'warmup' | 'start' | null>(null);
 
   /**
-   * Main function to orchestrate the content generation process.
-   * It now calls a serverless function and listens for streaming updates.
+   * Main function to orchestrate the content generation process for all categories.
+   * This now operates in two distinct phases:
+   * 1. Gather all news articles first.
+   * 2. Process all gathered articles.
    */
   const handleStartAutomation = useCallback(async () => {
-    if (isProcessing) return; // Prevent multiple simultaneous runs
-
     setIsProcessing(true);
-    initializeTasks(); // Reset tasks to pending state before starting
+    setCompletedCount(0);
+    
+    // Initialize tasks state
+    const initialTasks: BatchTask[] = NEWS_CATEGORIES.map(cat => ({
+        id: cat.apiValue,
+        categoryName: cat.name,
+        status: TaskStatus.PENDING,
+    }));
+    setTasks(initialTasks);
 
-    try {
-        const response = await fetch('/api/automate');
-        if (!response.ok) {
-            throw new Error(`Automation request failed: ${response.statusText}`);
-        }
-        if (!response.body) {
-            throw new Error('Automation response is empty.');
-        }
+    const usedArticleLinks = new Set<string>();
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+    // Helper to update state immutably
+    const updateTask = (taskId: string, updates: Partial<BatchTask>) => {
+        setTasks(prevTasks => prevTasks.map(task => 
+            task.id === taskId ? { ...task, ...updates } : task
+        ));
+    };
+    
+    // --- PHASE 1: GATHER ALL NEWS ARTICLES ---
+    const collectedData: CollectedData[] = [];
+    for (const category of NEWS_CATEGORIES) {
+        const taskId = category.apiValue;
+        try {
+            updateTask(taskId, { status: TaskStatus.GATHERING });
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+            let allArticles: NewsDataArticle[];
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || ''; // Keep the last partial line
+            if (category.apiValue === 'top') {
+                console.log('Gathering articles for synthetic "Trending" category...');
+                const otherCategoryValues = NEWS_CATEGORIES
+                    .filter(c => c.apiValue !== 'top')
+                    .map(c => c.apiValue);
 
-            for (const line of lines) {
-                if (line.trim() === '') continue;
-                try {
-                    const update: BatchTask = JSON.parse(line);
-                    
-                    setTasks(prevTasks => {
-                        let alreadyDone = false;
-                        const newTasks = prevTasks.map(t => {
-                            if (t.id === update.id) {
-                                if (t.status === TaskStatus.DONE) alreadyDone = true;
-                                return update;
-                            }
-                            return t;
-                        });
+                const articlesFromAllCategories = (await Promise.all(
+                    otherCategoryValues.map(cat => fetchLatestBangladeshiNews(cat))
+                )).flat();
 
-                        // Only increment completed count if the status transitions to DONE
-                        if (update.status === TaskStatus.DONE && !alreadyDone) {
-                            setCompletedCount(prev => prev + 1);
-                        }
-                        
-                        return newTasks;
-                    });
-
-                } catch (e) {
-                    console.error("Failed to parse stream update:", line, e);
+                // Deduplicate using a Map, which is concise and effective
+                const uniqueArticles = Array.from(new Map(articlesFromAllCategories.map(article => [article.link, article])).values());
+                
+                // Sort by publication date (newest first)
+                uniqueArticles.sort((a, b) => {
+                    // Make sure pubDate exists to avoid errors
+                    if (!a.pubDate || !b.pubDate) return 0;
+                    return new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime();
+                });
+                
+                // Take the top 10 most recent articles across all categories
+                allArticles = uniqueArticles.slice(0, 10);
+                
+                if (allArticles.length === 0) {
+                    throw new Error('Could not find any valid articles to construct a "Trending" category.');
                 }
-            }
-        }
-    } catch (error) {
-        console.error("An error occurred during automation:", error);
-        // Optionally, update all tasks to show a general error
-        setTasks(prev => prev.map(t => ({ ...t, status: TaskStatus.ERROR, error: 'Automation failed to start.'})));
-    } finally {
-        setIsProcessing(false);
-    }
-  }, [isProcessing]);
+                console.log(`Created "Trending" category with ${allArticles.length} most recent articles.`);
 
-  // Effect to trigger automation via URL parameter, now robust.
-  useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.get('action') === 'start_automation' && !isProcessing && !automationTriggered) {
-        setAutomationTriggered(true); // Prevent re-triggering
-        handleStartAutomation();
+            } else {
+                 allArticles = await fetchLatestBangladeshiNews(category.apiValue);
+            }
+            
+            const unusedArticles = allArticles.filter(article => !usedArticleLinks.has(article.link));
+
+            if (unusedArticles.length === 0) {
+                 throw new Error(`No new, unused articles found for ${category.name}.`);
+            }
+
+            const result = await findAndAnalyzeBestArticleFromList(unusedArticles);
+            
+            if (!result) {
+                throw new Error(`Could not find a relevant, unused Bangladesh-specific article for ${category.name}.`);
+            }
+            
+            const { analysis, article: relevantArticle } = result;
+            usedArticleLinks.add(relevantArticle.link);
+            collectedData.push({ taskId, analysis, article: relevantArticle });
+            
+            updateTask(taskId, { status: TaskStatus.GATHERED });
+
+            // Wait 5 seconds before fetching the next category as requested.
+            await new Promise(resolve => setTimeout(resolve, API_FETCH_DELAY_MS));
+
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
+            console.error(`Failed to gather article for category ${category.name}:`, err);
+            updateTask(taskId, { status: TaskStatus.ERROR, error: errorMessage });
+        }
     }
-  }, [handleStartAutomation, isProcessing, automationTriggered]);
+
+    // --- PHASE 2: PROCESS ALL GATHERED ARTICLES ---
+    for (const data of collectedData) {
+        const { taskId, analysis, article } = data;
+        try {
+            updateTask(taskId, { status: TaskStatus.PROCESSING });
+
+            // 1. LOAD OR GENERATE IMAGE
+            let imageToCompose: HTMLImageElement;
+            try {
+                imageToCompose = await loadImage(article.image_url!);
+            } catch (error) {
+                console.warn(`Failed to load article image, generating a new one. Reason: ${error}`);
+                updateTask(taskId, { status: TaskStatus.GENERATING_IMAGE });
+                const generatedImageBase64 = await generateImageFromPrompt(analysis.imagePrompt);
+                imageToCompose = await loadImage(generatedImageBase64);
+            }
+
+            // 2. COMPOSING IMAGE
+            updateTask(taskId, { status: TaskStatus.COMPOSING });
+            const compiledImage = await composeImage(
+              imageToCompose,
+              analysis.headline,
+              analysis.highlightPhrases,
+              LOGO_URL,
+              BRAND_TEXT,
+              OVERLAY_IMAGE_URL
+            );
+
+            // 3. UPLOADING IMAGE TO CLOUDINARY
+            updateTask(taskId, { status: TaskStatus.UPLOADING });
+            const imageUrl = await uploadToCloudinary(compiledImage);
+
+            // 4. SENDING TO WEBHOOK
+            updateTask(taskId, { status: TaskStatus.SENDING_WEBHOOK });
+            const webhookPayload: WebhookPayload = {
+                headline: analysis.headline,
+                imageUrl: imageUrl,
+                summary: analysis.caption,
+                newsLink: article.link,
+                status: 'Queue'
+            };
+            await sendToMakeWebhook(webhookPayload);
+            
+            // TASK DONE
+            updateTask(taskId, { 
+                status: TaskStatus.DONE,
+                result: {
+                    headline: analysis.headline,
+                    imageUrl: imageUrl,
+                    caption: analysis.caption,
+                    sourceUrl: article.link,
+                    sourceName: analysis.sourceName,
+                }
+            });
+            setCompletedCount(prev => prev + 1);
+
+        } catch (err) {
+            const errorMessage = err instanceof Error ? err.message : "An unknown error occurred.";
+            console.error(`Failed task for category ${NEWS_CATEGORIES.find(c=>c.apiValue === taskId)?.name}:`, err);
+            updateTask(taskId, { status: TaskStatus.ERROR, error: errorMessage });
+        }
+    }
+
+    setIsProcessing(false);
+  }, []);
+
+  // Effect to handle URL triggers and set base URL
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      setBaseUrl(window.location.origin);
+
+      if (!hasTriggeredFromUrl && !isProcessing) {
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('action') === 'start') {
+          console.log('Start action triggered from URL.');
+          setHasTriggeredFromUrl(true); // Prevent re-triggering on the same page load
+          handleStartAutomation();
+        }
+      }
+    }
+  }, [handleStartAutomation, hasTriggeredFromUrl, isProcessing]);
+
+  const copyToClipboard = (text: string, type: 'warmup' | 'start') => {
+    navigator.clipboard.writeText(text).then(() => {
+        setCopiedUrl(type);
+        setTimeout(() => setCopiedUrl(null), 2000);
+    });
+  };
 
   const overallProgress = tasks.length > 0 ? (completedCount / tasks.length) * 100 : 0;
 
@@ -134,7 +220,7 @@ const App: React.FC = () => {
           <div className="bg-gray-800/50 backdrop-blur-sm border border-gray-700 rounded-2xl p-8 shadow-2xl">
             <h2 className="text-2xl font-semibold text-gray-200">Generate Social Media Post Batch</h2>
             <p className="mt-2 text-gray-400 max-w-2xl mx-auto">
-              Click the button to manually start the process, or use the cron job URLs below to automate it.
+              Click start to first gather news from 5 categories, then process them into social media posts for your workflow.
             </p>
             <div className="mt-8">
               <button
@@ -146,34 +232,56 @@ const App: React.FC = () => {
               </button>
             </div>
           </div>
-
-          <div className="mt-8 bg-gray-800/50 backdrop-blur-sm border border-gray-700 rounded-2xl p-8 shadow-2xl text-left">
-            <h3 className="text-xl font-semibold text-gray-200 mb-2 text-center">Cron Job Triggers</h3>
-            <p className="text-center text-sm text-gray-400 mb-6">Use these URLs to automate the process. Schedule the warm-up first, then the start link 1-2 minutes later.</p>
+          
+          <div className="mt-8 w-full bg-gray-800/50 backdrop-blur-sm border border-gray-700 rounded-2xl p-6 text-left">
+            <h3 className="text-lg font-semibold text-gray-200 mb-2">Cron Job Trigger URLs</h3>
+            <p className="text-sm text-gray-400 mb-4">
+                Use these URLs to automate the process. Schedule the warm-up first, then the start job a minute later.
+            </p>
             <div className="space-y-4">
-                {/* Warm-up URL */}
                 <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">Warm-up URL (pings the app to prevent cold starts)</label>
-                    <div className="flex items-center gap-2">
-                        <input type="text" readOnly value={warmupUrl} className="w-full bg-gray-900 border border-gray-600 rounded-md px-3 py-2 text-gray-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"/>
-                        <button onClick={() => handleCopy(warmupUrl, 'warmup')} className="bg-gray-600 text-white font-semibold px-4 py-2 rounded-md hover:bg-gray-500 transition-colors w-28">
-                            {warmupCopied ? 'Copied!' : 'Copy'}
+                    <label className="text-xs font-medium text-gray-400" htmlFor="warmup-url">Warm-up URL (Prevents Cold Starts)</label>
+                    <div className="flex items-center gap-2 mt-1">
+                        <input
+                            id="warmup-url"
+                            type="text"
+                            readOnly
+                            value={baseUrl ? `${baseUrl}/?action=warmup` : 'Loading...'}
+                            className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-sm text-gray-300 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            aria-label="Warm-up URL"
+                        />
+                        <button 
+                          onClick={() => copyToClipboard(`${baseUrl}/?action=warmup`, 'warmup')}
+                          disabled={!baseUrl}
+                          className="bg-gray-600 text-white font-semibold px-4 py-2 rounded-lg hover:bg-gray-500 disabled:bg-gray-700 disabled:cursor-not-allowed transition-colors duration-200 text-sm flex-shrink-0"
+                        >
+                          {copiedUrl === 'warmup' ? 'Copied!' : 'Copy'}
                         </button>
                     </div>
                 </div>
-                {/* Start Automation URL */}
                 <div>
-                    <label className="block text-sm font-medium text-gray-300 mb-1">Start Automation URL (initiates the process)</label>
-                    <div className="flex items-center gap-2">
-                        <input type="text" readOnly value={startUrl} className="w-full bg-gray-900 border border-gray-600 rounded-md px-3 py-2 text-gray-300 focus:outline-none focus:ring-2 focus:ring-indigo-500"/>
-                        <button onClick={() => handleCopy(startUrl, 'start')} className="bg-indigo-600 text-white font-semibold px-4 py-2 rounded-md hover:bg-indigo-500 transition-colors w-28">
-                            {startCopied ? 'Copied!' : 'Copy'}
+                    <label className="text-xs font-medium text-gray-400" htmlFor="start-url">Start Automation URL</label>
+                    <div className="flex items-center gap-2 mt-1">
+                        <input
+                            id="start-url"
+                            type="text"
+                            readOnly
+                            value={baseUrl ? `${baseUrl}/?action=start` : 'Loading...'}
+                            className="w-full bg-gray-900 border border-gray-600 rounded-md p-2 text-sm text-gray-300 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                            aria-label="Start Automation URL"
+                        />
+                        <button 
+                          onClick={() => copyToClipboard(`${baseUrl}/?action=start`, 'start')}
+                          disabled={!baseUrl}
+                          className="bg-indigo-600 text-white font-semibold px-4 py-2 rounded-lg hover:bg-indigo-500 disabled:bg-indigo-700 disabled:cursor-not-allowed transition-colors duration-200 text-sm flex-shrink-0"
+                        >
+                          {copiedUrl === 'start' ? 'Copied!' : 'Copy'}
                         </button>
                     </div>
                 </div>
             </div>
           </div>
-          
+
           {tasks.length > 0 && (
              <div className="mt-8">
                 {isProcessing && (
