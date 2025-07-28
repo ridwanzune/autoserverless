@@ -10,6 +10,12 @@ export const CLOUDINARY_UPLOAD_PRESET = 'Autoupload';
 export const MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/mvsz33n18i6dl18xynls7ie9gnoxzghl';
 export const MAKE_WEBHOOK_AUTH_TOKEN = 'xR@7!pZ2#qLd$Vm8^tYe&WgC*oUeXsKv';
 
+// --- NEW: STATUS REPORTING WEBHOOK ---
+// Create a new, separate webhook in Make.com for receiving status updates.
+// This is critical for monitoring and debugging the cron job.
+// Paste the new webhook URL here.
+export const MAKE_STATUS_WEBHOOK_URL = 'https://hook.eu2.make.com/0ui64t2di3wvvg00fih0d32qp9i9jgme';
+
 
 // --- NEW: NEWS CATEGORIES FOR BATCH PROCESSING ---
 // These map to the categories supported by the newsdata.io API
@@ -21,8 +27,9 @@ export const NEWS_CATEGORIES = [
   { name: 'Business/Corporate', apiValue: 'business' },
 ];
 
-// The delay in milliseconds between fetching news for each category
-export const API_FETCH_DELAY_MS = 5000;
+// The delay in milliseconds between fetching news for each category.
+// This has been set to 0 to prevent cron job timeouts.
+export const API_FETCH_DELAY_MS = 0;
 
 
 // URL for the new logo image

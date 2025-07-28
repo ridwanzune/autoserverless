@@ -25,6 +25,18 @@ export interface WebhookPayload {
   status: 'Queue';
 }
 
+/**
+ * NEW: Payload for the status monitoring webhook.
+ * This provides "heartbeat" updates and error logs during cron job execution.
+ */
+export interface StatusWebhookPayload {
+  timestamp: string;
+  level: 'INFO' | 'ERROR' | 'SUCCESS';
+  message: string;
+  category?: string;
+  details?: Record<string, any>;
+}
+
 export enum TaskStatus {
   PENDING = 'Pending',
   // Phase 1: Gathering

@@ -1,4 +1,5 @@
 {
-  "name": "Empty",
-  "description": "An empty app"
+  "name": "Dhaka Dispatch Auto",
+  "description": "An empty app",
+  "requestFramePermissions": []
 }
